@@ -1,0 +1,150 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ORTHOAXIS PLANNER</title>
+<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#1b1f24"><link rel="apple-touch-icon" href="icons/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="OrthoAxis">
+<style>
+:root{color-scheme:dark;--bg:#1b1f24;--pn:#252b32;--ln:#3a424c;--tx:#eef1f4;--ac:#4aa8ff;--wr:#ffb347;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif;display:flex;flex-direction:column}
+#tb{display:flex;flex-wrap:wrap;gap:4px;padding:6px;background:var(--pn);border-bottom:1px solid var(--ln);align-items:center}
+button,.b,select,input{min-height:38px;background:#323a44;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:4px 8px;font:inherit}
+button.on,.b.on{background:var(--ac);color:#06121f;border-color:var(--ac)}.b{display:inline-flex;align-items:center;cursor:pointer}
+main{flex:1;min-height:0;display:flex;flex-direction:column}
+#vw{flex:1 1 48%;min-height:0;position:relative;background:#000}
+canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+#pn{flex:1 1 52%;overflow:auto;padding:8px;background:var(--pn)}
+.tabs{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.card{border:1px solid var(--ln);border-radius:8px;padding:6px;margin:6px 0;display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.card input[type=text]{flex:1 1 120px}.card input[type=number]{width:80px}.sm{font-size:12px;opacity:.8}.bad{color:var(--wr)}
+@media(min-width:900px){main{flex-direction:row}#pn{flex:0 0 400px}}
+</style></head><body>
+<div id="tb">
+<label class="b">Open image(s)<input id="fi" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden></label>
+<button id="t_pan" onclick="setTool('pan')">Pan</button><button id="t_lm" onclick="setTool('lm')">Landmark</button><button id="t_cal" onclick="setTool('cal')">Calibrate</button><button id="t_ang" onclick="setTool('ang')">3-pt Angle</button><button id="t_crop" onclick="setTool('crop')">Crop</button><button onclick="clearCrop()">Uncrop</button>
+<button onclick="fit()">Fit</button><button onclick="undo()">Undo</button><button onclick="redo()">Redo</button>
+<button id="vb" onclick="showPlan=!showPlan;changed(1)">Baseline</button><span id="st" class="sm"></span>
+</div>
+<main><div id="vw"><canvas id="cv"></canvas></div><div id="pn"></div></main>
+<script>
+const $=s=>document.querySelector(s),cv=$('#cv'),esc=s=>String(s).replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
+const uid=()=>Math.random().toString(36).slice(2,10);
+const newState=()=>({lm:[],ang:[],cal:null,x:{},sc:[{id:uid(),name:'Plan A',os:[]}],act:0});
+let S=newState(),cur=null,img=null,view={s:1,x:0,y:0},tool='pan',T='cases',hist=[],rd=[],showPlan=false,selL=null,calPts=[],pend=null,Q='',msg='',ERR={};
+const sc=()=>S.sc[S.act],sub=(a,b)=>[a[0]-b[0],a[1]-b[1]],len=v=>Math.hypot(v[0],v[1]),R2D=180/Math.PI;
+const fmt=(v,p=1)=>v==null||!isFinite(v)?'n/a':v.toFixed(p);
+/* ---- geometry (source-image px, y axis points DOWN; positive rotation = clockwise on screen) ---- */
+function ang3(v,a,b,signed){if(!v||!a||!b)return null;const u=sub(a,v),w=sub(b,v);if(len(u)<1e-9||len(w)<1e-9)return null;const d=Math.atan2(u[0]*w[1]-u[1]*w[0],u[0]*w[0]+u[1]*w[1])*R2D;return signed?d:Math.abs(d)}
+function inter(p1,p2,p3,p4){if(!p1||!p2||!p3||!p4)return null;const d1=sub(p2,p1),d2=sub(p4,p3),l1=len(d1),l2=len(d2);if(l1<1e-9||l2<1e-9)return null;const den=d1[0]*d2[1]-d1[1]*d2[0];if(Math.abs(den/(l1*l2))<1e-3)return null;const t=((p3[0]-p1[0])*d2[1]-(p3[1]-p1[1])*d2[0])/den;return[p1[0]+t*d1[0],p1[1]+t*d1[1]]}
+function simulate(){const m={};S.lm.forEach(l=>m[l.id]=[l.x,l.y]);ERR={};
+ for(const o of sc().os){if(!o.en)continue;const a=m[o.c1],b=m[o.c2],h=m[o.h];if(!a||!b||!h||len(sub(a,b))<1e-9){ERR[o.id]='Invalid: missing landmark or degenerate cut line (operation skipped, NOT discarded)';continue}
+ const th=o.ang*o.dir/R2D,cs=Math.cos(th),sn=Math.sin(th),d=sub(b,a);
+ for(const id in m){const p=m[id];if(d[0]*(p[1]-a[1])-d[1]*(p[0]-a[0])>1e-9){const x=p[0]-h[0],y=p[1]-h[1];m[id]=[h[0]+cs*x-sn*y+o.tx,h[1]+sn*x+cs*y+o.ty]}}}
+ return m}
+const PM=plan=>{if(plan)return simulate();const m={};S.lm.forEach(l=>m[l.id]=[l.x,l.y]);return m};
+const mmpp=()=>S.cal?S.cal.mmpp:null;
+/* ---- storage ---- */
+const db=new Promise((r,j)=>{const q=indexedDB.open('orthoaxis',1);q.onupgradeneeded=()=>q.result.createObjectStore('cases',{keyPath:'id'});q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)});
+const tx=async(m,f)=>{const d=await db;return new Promise((r,j)=>{const t=d.transaction('cases',m);const o=f(t.objectStore('cases'));t.oncomplete=()=>r(o.result);t.onerror=()=>j(t.error)})};
+let svT;const sv=()=>{if(!cur)return;$('#st').textContent='Saving…';clearTimeout(svT);svT=setTimeout(async()=>{try{cur.state=JSON.parse(JSON.stringify(S));cur.mod=Date.now();await tx('readwrite',s=>s.put(cur));$('#st').textContent='Saved locally ✓'}catch(e){$('#st').textContent='SAVE FAILED (storage full/blocked?)'}},400)};
+/* ---- state ---- */
+const push=()=>{hist.push(JSON.stringify(S));if(hist.length>200)hist.shift();rd=[]};
+const commit=f=>{push();f();changed()};
+function changed(nosave){$('#vb').textContent=showPlan?'Planned (sim.)':'Baseline';$('#vb').classList.toggle('on',showPlan);R();draw();if(!nosave)sv()}
+function undo(){if(!hist.length)return;rd.push(JSON.stringify(S));S=JSON.parse(hist.pop());changed()}
+function redo(){if(!rd.length)return;hist.push(JSON.stringify(S));S=JSON.parse(rd.pop());changed()}
+const L={lm:()=>S.lm,ang:()=>S.ang,os:()=>sc().os,sc:()=>S.sc};
+function E(k,id,f,el){commit(()=>{const o=L[k]().find(o=>o.id==id);o[f]=el.type=='checkbox'?(typeof o[f]=='number'?+el.checked:el.checked):typeof o[f]=='number'?+el.value:el.value})}
+function X(f,el){commit(()=>{S.x[f]=el.value})}
+function D(k,id){if(pend!=id){pend=id;R();return}pend=null;commit(()=>{const a=L[k]();if(k=='sc'&&a.length<2)return;a.splice(a.findIndex(o=>o.id==id),1);if(S.act>=S.sc.length)S.act=0})}
+function Dup(k,id){commit(()=>{const a=L[k](),o=JSON.parse(JSON.stringify(a.find(o=>o.id==id)));o.id=uid();o.name+=' copy';if(k=='sc')o.os.forEach(q=>q.id=uid());a.push(o)})}
+function Mv(id,d){commit(()=>{const a=sc().os,i=a.findIndex(o=>o.id==id),j=i+d;if(j<0||j>=a.length)return;[a[i],a[j]]=[a[j],a[i]]})}
+function addLm(x,y){commit(()=>{const l={id:uid(),name:'P'+(S.lm.length+1),x,y,lock:0,hide:0};S.lm.push(l);selL=l.id})}
+function addAng(){if(S.lm.length<3)return;commit(()=>S.ang.push({id:uid(),name:'Angle '+(S.ang.length+1),cat:'',v:S.lm[0].id,a:S.lm[1].id,b:S.lm[2].id,signed:0,prec:1,show:1}))}
+function addOs(){if(S.lm.length<3)return;commit(()=>sc().os.push({id:uid(),name:'Osteotomy '+(sc().os.length+1),seg:'',c1:S.lm[0].id,c2:S.lm[1].id,h:S.lm[0].id,ang:0,dir:1,tx:0,ty:0,en:1}))}
+function addSc(){commit(()=>{S.sc.push({id:uid(),name:'Plan '+String.fromCharCode(65+S.sc.length),os:[]});S.act=S.sc.length-1})}
+function applyCal(){const mm=+$('#kn').value,d=len(sub(calPts[0],calPts[1]));if(!(mm>0)||!isFinite(mm)||d<1e-9){msg='Rejected: need reference length > 0 and two distinct points.';R();return}
+ commit(()=>{S.cal={p:calPts,mm,mmpp:mm/d,ppm:d/mm,t:Date.now()}});calPts=[];msg=''}
+/* ---- panels ---- */
+const sel=(pre,cur)=>`<select onchange="${pre}this)"><option value="">—</option>${S.lm.map(l=>`<option value="${l.id}"${l.id==cur?' selected':''}>${esc(l.name)}</option>`).join('')}</select>`;
+const delb=(k,id)=>`<button onclick="D('${k}','${id}')">${pend==id?'Confirm delete?':'Delete'}</button>`;
+function R(){const p=$('#pn');const tabs=[['cases','Cases'],['pts','Points'],['ang','Angles'],['axes','Axes/CORA'],['os','Osteotomy'],['help','Help']];
+ let h=`<div class="tabs">${tabs.map(t=>`<button class="${T==t[0]?'on':''}" onclick="T='${t[0]}';R()">${t[1]}</button>`).join('')}</div>`;
+ if(T=='cases')h+=cases();else if(!cur)h+='<p>Open an image first (Cases tab or toolbar).</p>';
+ else if(T=='pts')h+=pts();else if(T=='ang')h+=angs();else if(T=='axes')h+=axes();else if(T=='os')h+=oss();
+ if(T=='help')h+=help();p.innerHTML=h;if(T=='cases')casesList()}
+function pts(){return `<div class="sm">Landmark tool: tap to add, drag to move. Pan tool or two-finger pinch to navigate.</div>`+S.lm.map(l=>`<div class="card" style="${l.id==selL?'border-color:var(--ac)':''}"><input type="text" value="${esc(l.name)}" onchange="E('lm','${l.id}','name',this)"><span class="sm">${l.x.toFixed(0)}, ${l.y.toFixed(0)} px</span><label><input type="checkbox" ${l.lock?'checked':''} onchange="E('lm','${l.id}','lock',this)">Lock</label><label><input type="checkbox" ${l.hide?'checked':''} onchange="E('lm','${l.id}','hide',this)">Hide</label>${delb('lm',l.id)}</div>`).join('')}
+function angs(){const B=PM(0),P=PM(1),q=Q.toLowerCase();let h=`<div class="card"><button onclick="addAng()">+ Add angle</button><input type="text" placeholder="Search…" value="${esc(Q)}" onchange="Q=this.value;R()"></div><div class="sm">${S.ang.length} angle(s). Needs ≥3 landmarks. Results recalculate live.</div>`;
+ return h+S.ang.filter(a=>!q||(a.name+a.cat).toLowerCase().includes(q)).map(a=>{const rb=ang3(B[a.v],B[a.a],B[a.b],a.signed),rp=ang3(P[a.v],P[a.a],P[a.b],a.signed);
+ return `<div class="card"><input type="text" value="${esc(a.name)}" onchange="E('ang','${a.id}','name',this)"><input type="text" placeholder="Category" value="${esc(a.cat)}" onchange="E('ang','${a.id}','cat',this)">
+ <span>V ${sel(`E('ang','${a.id}','v',`,a.v)}</span><span>A ${sel(`E('ang','${a.id}','a',`,a.a)}</span><span>B ${sel(`E('ang','${a.id}','b',`,a.b)}</span>
+ <select onchange="E('ang','${a.id}','signed',this)"><option value="0">Unsigned</option><option value="1"${a.signed?' selected':''}>Signed</option></select>
+ <select onchange="E('ang','${a.id}','prec',this)">${[0,1,2,3].map(n=>`<option${n==a.prec?' selected':''}>${n}</option>`).join('')}</select>
+ <label><input type="checkbox" ${a.show?'checked':''} onchange="E('ang','${a.id}','show',this)">Show</label>
+ <b>Baseline: ${rb==null?'<span class=bad>unavailable</span>':fmt(rb,a.prec)+'°'}</b><b>Planned (sim.): ${rp==null?'<span class=bad>unavailable</span>':fmt(rp,a.prec)+'°'}</b>
+ <button onclick="Dup('ang','${a.id}')">Duplicate</button>${delb('ang',a.id)}</div>`}).join('')}
+function axes(){const x=S.x,B=PM(0),P=PM(1),c=S.cal;
+ let h=`<div class="card"><b>Calibration</b> ${c?`1 px = ${c.mmpp.toFixed(4)} mm (set ${new Date(c.t).toLocaleString()}) — this image only`:'<span class=bad>Not calibrated: distances in px</span>'}<button onclick="setTool('cal')">Pick 2 reference points</button>`;
+ if(calPts.length==2)h+=`<input id="kn" type="number" step="any" placeholder="known mm"><button onclick="applyCal()">Apply</button>`;
+ h+=`<div class="sm">${msg||'Calibration does not remove projection magnification or positioning error.'}</div></div>`;
+ const hka=M=>{const k=M[x.k],a=M[x.a],hh=M[x.h];const g=ang3(k,hh,a,0);let mad=null;if(hh&&a&&k&&len(sub(a,hh))>1e-9){const d=sub(a,hh);mad=(d[0]*(k[1]-hh[1])-d[1]*(k[0]-hh[0]))/len(d)}return[g,mad]};
+ const [gb,mb]=hka(B),[gp,mp]=hka(P),mad=v=>v==null?'n/a':(mmpp()?(v*mmpp()).toFixed(1)+' mm':v.toFixed(1)+' px');
+ h+=`<div class="card"><b>Hip–Knee–Ankle (mechanical, centres)</b><span>Hip ${sel("X('h',",x.h)}</span><span>Knee ${sel("X('k',",x.k)}</span><span>Ankle ${sel("X('a',",x.a)}</span>
+ <div>Baseline: knee angle ${fmt(gb)}° (deviation from 180° = ${gb==null?'n/a':fmt(180-gb)}°), MAD ${mad(mb)}</div><div>Planned (sim.): ${fmt(gp)}°, deviation ${gp==null?'n/a':fmt(180-gp)}°, MAD ${mad(mp)}</div>
+ <div class="sm">Unsigned interior angle at knee. MAD = signed perpendicular distance of knee from hip–ankle line (positive = knee on screen-left of hip→ankle). No varus/valgus label is inferred; MPTA/mLDFA/JLCA: build with custom angles from your own landmarks.</div></div>`;
+ const co=M=>({i:inter(M[x.p1],M[x.p2],M[x.d1],M[x.d2]),a:M[x.p1]&&M[x.p2]&&M[x.d1]&&M[x.d2]?(()=>{const u=sub(M[x.p2],M[x.p1]),w=sub(M[x.d2],M[x.d1]);return len(u)>1e-9&&len(w)>1e-9?Math.abs(Math.atan2(u[0]*w[1]-u[1]*w[0],u[0]*w[0]+u[1]*w[1]))*R2D:null})():null});
+ const cb=co(B),cp=co(P),f=r=>r.i?`CORA candidate at (${r.i[0].toFixed(0)}, ${r.i[1].toFixed(0)}) px, axes angle ${fmt(r.a)}°`:'<span class=bad>No stable intersection (parallel/near-parallel |sinθ|&lt;0.001, or missing/degenerate axis)</span>';
+ h+=`<div class="card"><b>CORA (2D)</b><span>Prox axis ${sel("X('p1',",x.p1)} ${sel("X('p2',",x.p2)}</span><span>Distal axis ${sel("X('d1',",x.d1)} ${sel("X('d2',",x.d2)}</span><div>Baseline: ${f(cb)}</div><div>Planned (sim.): ${f(cp)}</div><div class="sm">A geometric intersection of two chosen axes — not a validated deformity apex. One radiographic plane cannot represent a 3D deformity.</div></div>`;return h}
+function oss(){let h=`<div class="card"><select onchange="S.act=this.selectedIndex;changed(1)">${S.sc.map((s,i)=>`<option${i==S.act?' selected':''}>${esc(s.name)}</option>`).join('')}</select><input type="text" value="${esc(sc().name)}" onchange="E('sc','${sc().id}','name',this)"><button onclick="addSc()">+ Scenario</button><button onclick="Dup('sc','${sc().id}')">Duplicate</button>${S.sc.length>1?delb('sc',sc().id):''}</div>
+ <div class="card"><button onclick="addOs()">+ Add osteotomy</button><span class="sm">${sc().os.length} operation(s), applied top→bottom. Order changes the result (rotations/translations don't commute). Use “Planned” view.</span></div>`;simulate();
+ return h+sc().os.map((o,i)=>`<div class="card"><b>#${i+1}</b><input type="text" value="${esc(o.name)}" onchange="E('os','${o.id}','name',this)"><input type="text" placeholder="Segment label" value="${esc(o.seg)}" onchange="E('os','${o.id}','seg',this)">
+ <label><input type="checkbox" ${o.en?'checked':''} onchange="E('os','${o.id}','en',this)">Enabled</label>
+ <span>Cut ${sel(`E('os','${o.id}','c1',`,o.c1)}→${sel(`E('os','${o.id}','c2',`,o.c2)}</span><span>Hinge ${sel(`E('os','${o.id}','h',`,o.h)}</span>
+ <label>Angle° <input type="number" step="any" value="${o.ang}" onchange="E('os','${o.id}','ang',this)"></label>
+ <select onchange="E('os','${o.id}','dir',this)"><option value="1">Clockwise</option><option value="-1"${o.dir<0?' selected':''}>Counter-clockwise</option></select>
+ <label>Tx px <input type="number" step="any" value="${o.tx}" onchange="E('os','${o.id}','tx',this)"></label><label>Ty px <input type="number" step="any" value="${o.ty}" onchange="E('os','${o.id}','ty',this)"></label>
+ <button onclick="Mv('${o.id}',-1)">↑</button><button onclick="Mv('${o.id}',1)">↓</button><button onclick="Dup('os','${o.id}')">Duplicate</button>${delb('os',o.id)}
+ <div class="sm ${ERR[o.id]?'bad':''}" style="width:100%">${ERR[o.id]||(o.en?'Valid. Moves all landmarks on the left of cut line (a→b, screen coords) around hinge, then translates.':'Disabled (kept).')}</div></div>`).join('')}
+function cases(){return `<div class="card"><button onclick="expo()">Export current case (JSON)</button><button onclick="$('#imp').style.display='block'">Import</button><button onclick="wipe()">${pend=='wipe'?'Confirm: delete ALL local data':'Delete all local data'}</button></div><textarea id="imp" style="display:none;width:100%;height:80px" placeholder="Paste backup JSON, then tap Import below"></textarea><button style="display:none" id="impb" onclick="impo()">Import pasted JSON</button><div id="cl">Loading…</div><div class="sm">Data stays on this device (IndexedDB). Clearing browser data deletes cases — export backups.</div>`}
+async function casesList(){try{const all=await tx('readonly',s=>s.getAll());$('#cl').innerHTML=all.sort((a,b)=>b.mod-a.mod).map(c=>`<div class="card"><b>${esc(c.name)}</b><span class="sm">${new Date(c.mod).toLocaleString()}</span><button onclick="openId('${c.id}')">Open</button><button onclick="delCase('${c.id}')">${pend==c.id?'Confirm?':'Delete'}</button></div>`).join('')||'<span class="sm">No cases yet.</span>';if($('#imp').style.display=='block')$('#impb').style.display='inline-block'}catch(e){$('#cl').textContent='Storage unavailable.'}}
+async function openId(id){const c=await tx('readonly',s=>s.get(id));load(c)}
+async function delCase(id){if(pend!=id){pend=id;R();return}pend=null;await tx('readwrite',s=>s.delete(id));if(cur&&cur.id==id){cur=null;img=null;S=newState()}changed(1)}
+async function wipe(){if(pend!='wipe'){pend='wipe';R();return}pend=null;await tx('readwrite',s=>s.clear());cur=null;img=null;S=newState();hist=[];changed(1)}
+function load(c){cur=c;S=c.state;hist=[];rd=[];const u=URL.createObjectURL(c.blob);const i=new Image();i.onload=()=>{img=i;fit();T='pts';changed(1)};i.src=u}
+$('#fi').onchange=async e=>{const fs=[...e.target.files];e.target.value='';for(const f of fs){const c={id:uid(),name:f.name,blob:f,state:newState(),mod:Date.now()};try{await tx('readwrite',s=>s.put(c))}catch(_){$('#st').textContent='SAVE FAILED (storage full/blocked?)'}if(f===fs[0])load(c)}};
+function expo(){if(!cur)return;const r=new FileReader();r.onload=()=>{const j=JSON.stringify({format:'orthoaxis-case',version:1,name:cur.name,image:r.result,state:S});const t=$('#imp');t.style.display='block';t.value=j;t.select();try{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([j],{type:'application/json'}));a.download=cur.name+'.orthoaxis.json';a.click()}catch(e){}};r.readAsDataURL(cur.blob)}
+async function impo(){try{const j=JSON.parse($('#imp').value);if(j.format!='orthoaxis-case'||j.version!=1||!j.state||!Array.isArray(j.state.lm)||!Array.isArray(j.state.sc)||typeof j.image!='string')throw 0;const blob=await (await fetch(j.image)).blob();load({id:uid(),name:j.name+' (imported)',blob,state:j.state,mod:Date.now()});sv()}catch(e){alert('Rejected: malformed or unsupported backup.')}}
+function help(){return `<div class="sm"><p><b>Safety:</b> educational planning aid; not clinically validated; not a substitute for surgical judgement. Simulated values are NOT postoperative measurements.</p><p><b>Coordinates:</b> stored in source-image pixels, origin top-left, y down. Positive rotation = clockwise on screen. Zoom/pan never change stored data.</p><p><b>Simulation:</b> only landmarks/measurements are transformed, in listed order, each from the previous result. The image is not warped or segmented. No gaps/overlaps are rendered. Cut line a→b: points to its screen-left (cross&gt;0) move.</p><p><b>Angles:</b> unsigned = 0–180°; signed = −180…180° from ray A to ray B (clockwise positive). Labels do not validate anatomical definitions.</p><p><b>Privacy:</b> everything is local; no network use.</p></div>`}
+/* ---- view ---- */
+let angPts=[],cropR=null;
+function setTool(t){tool=t;calPts=[];angPts=[];cropR=null;for(const k of['pan','lm','cal','ang','crop'])$('#t_'+k).classList.toggle('on',k==t);$('#st').textContent={ang:'Tap 3 points: ray A, vertex, ray B',crop:'Drag a rectangle to crop (non-destructive)',cal:'Tap two reference points',lm:'Tap to add, drag to move'}[t]||'';if(t=='cal'){T='axes';R()}draw()}
+function clearCrop(){if(S.crop){commit(()=>{delete S.crop});fit()}}
+function applyCrop(){const c=cropR;cropR=null;const x0=Math.max(0,Math.min(c.x0,c.x1)),y0=Math.max(0,Math.min(c.y0,c.y1)),x1=Math.min(img.width,Math.max(c.x0,c.x1)),y1=Math.min(img.height,Math.max(c.y0,c.y1));if(x1-x0<20||y1-y0<20){draw();return}commit(()=>{S.crop={x:x0,y:y0,w:x1-x0,h:y1-y0}});fit();setTool('pan')}
+function angTap(hit,p){if(hit&&angPts.includes(hit.id))return;let id;if(hit)id=hit.id;else{id=uid();commit(()=>{S.lm.push({id,name:'P'+(S.lm.length+1),x:p[0],y:p[1],lock:0,hide:0})})}angPts.push(id);if(angPts.length==3){const[a,v,b]=angPts;angPts=[];commit(()=>S.ang.push({id:uid(),name:'Angle '+(S.ang.length+1),cat:'',v,a,b,signed:0,prec:1,show:1}));T='ang';R();$('#st').textContent='Angle added — edit name/category in Angles tab'}else draw()}
+function fit(){if(!img)return;const c=S.crop||{x:0,y:0,w:img.width,h:img.height},w=cv.clientWidth,h=cv.clientHeight,s=Math.min(w/c.w,h/c.h);view={s,x:(w-c.w*s)/2-c.x*s,y:(h-c.h*s)/2-c.y*s};draw()}
+const toImg=(x,y)=>[(x-view.x)/view.s,(y-view.y)/view.s];
+function draw(){const r=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(cv.width!=w*r||cv.height!=h*r){cv.width=w*r;cv.height=h*r}const x=cv.getContext('2d');x.setTransform(1,0,0,1,0,0);x.clearRect(0,0,cv.width,cv.height);if(!img)return;
+ x.setTransform(r*view.s,0,0,r*view.s,r*view.x,r*view.y);{const cr=S.crop;if(cr){x.save();x.beginPath();x.rect(cr.x,cr.y,cr.w,cr.h);x.clip();x.drawImage(img,0,0);x.restore()}else x.drawImage(img,0,0)}const k=1/view.s,B=PM(0),P=showPlan?PM(1):B;x.lineWidth=1.5*k;x.font=13*k+'px system-ui';
+ const line=(a,b,c,dash)=>{if(!a||!b)return;const d=sub(b,a),l=len(d);if(l<1e-9)return;x.strokeStyle=c;x.setLineDash(dash?[8*k,6*k]:[]);x.beginPath();x.moveTo(a[0]-d[0]/l*6000,a[1]-d[1]/l*6000);x.lineTo(b[0]+d[0]/l*6000,b[1]+d[1]/l*6000);x.stroke();x.setLineDash([])};
+ S.ang.filter(a=>a.show&&P[a.v]&&P[a.a]&&P[a.b]).forEach(a=>{x.strokeStyle='#5cc8ff';x.beginPath();x.moveTo(...P[a.a]);x.lineTo(...P[a.v]);x.lineTo(...P[a.b]);x.stroke();x.fillStyle='#5cc8ff';x.fillText(a.name+' '+fmt(ang3(P[a.v],P[a.a],P[a.b],a.signed),a.prec)+'°',P[a.v][0]+9*k,P[a.v][1]-9*k)});
+ const xs=S.x;line(P[xs.p1],P[xs.p2],'#7dff7d',1);line(P[xs.d1],P[xs.d2],'#ffe066',1);const ci=inter(P[xs.p1],P[xs.p2],P[xs.d1],P[xs.d2]);if(ci){x.fillStyle='#ff5c5c';x.beginPath();x.arc(ci[0],ci[1],8*k,0,7);x.fill();x.fillText('CORA?',ci[0]+10*k,ci[1])}
+ if(P[xs.h]&&P[xs.k]&&P[xs.a]){x.strokeStyle='#fff';x.beginPath();x.moveTo(...P[xs.h]);x.lineTo(...P[xs.k]);x.lineTo(...P[xs.a]);x.stroke()}
+ sc().os.filter(o=>o.en).forEach(o=>{line(B[o.c1],B[o.c2],'#ff6b6b',1);if(B[o.h]){x.strokeStyle='#ff6b6b';x.beginPath();x.arc(B[o.h][0],B[o.h][1],10*k,0,7);x.stroke()}});
+ S.lm.filter(l=>!l.hide).forEach(l=>{const b=B[l.id],p=P[l.id];if(showPlan){x.fillStyle='rgba(180,180,180,.5)';x.beginPath();x.arc(b[0],b[1],5*k,0,7);x.fill()}x.fillStyle=showPlan?'#ffb347':(l.id==selL?'#4aa8ff':'#fff');x.strokeStyle='#000';x.beginPath();x.arc(p[0],p[1],6*k,0,7);x.fill();x.stroke();x.fillText(l.name,p[0]+9*k,p[1]+4*k)});
+ calPts.forEach(p=>{x.fillStyle='#ffe066';x.beginPath();x.arc(p[0],p[1],6*k,0,7);x.fill()});angPts.forEach(id=>{const p=B[id];if(p){x.strokeStyle='#ffe066';x.beginPath();x.arc(p[0],p[1],11*k,0,7);x.stroke()}});if(cropR){x.strokeStyle='#4aa8ff';x.setLineDash([6*k,4*k]);x.strokeRect(cropR.x0,cropR.y0,cropR.x1-cropR.x0,cropR.y1-cropR.y0);x.setLineDash([])}if(S.cal){x.strokeStyle='#ffe066';x.beginPath();x.moveTo(...S.cal.p[0]);x.lineTo(...S.cal.p[1]);x.stroke()}}
+/* ---- pointers ---- */
+const PT={};let drag=null,last=null,gest=false;
+const hitLm=(x,y)=>{let best=null,bd=22;for(const l of S.lm){if(l.hide)continue;const d=Math.hypot(l.x*view.s+view.x-x,l.y*view.s+view.y-y);if(d<bd){bd=d;best=l}}return best};
+const pinchInfo=()=>{const a=Object.values(PT);return{d:Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1]),m:[(a[0][0]+a[1][0])/2,(a[0][1]+a[1][1])/2]}};
+cv.onpointerdown=e=>{cv.setPointerCapture(e.pointerId);PT[e.pointerId]=[e.offsetX,e.offsetY];const n=Object.keys(PT).length;
+ if(n>=2){gest=true;drag=null;last=pinchInfo();return}gest=false;const hit=(tool=='lm'||tool=='ang')&&!showPlan?hitLm(e.offsetX,e.offsetY):null;
+ drag={x:e.offsetX,y:e.offsetY,vx:view.x,vy:view.y,id:hit&&!hit.lock?hit.id:null,hit,moved:0,pushed:0}};
+cv.onpointermove=e=>{if(!PT[e.pointerId])return;PT[e.pointerId]=[e.offsetX,e.offsetY];
+ if(Object.keys(PT).length>=2){const p=pinchInfo(),f=p.d/last.d,ip=[(last.m[0]-view.x)/view.s,(last.m[1]-view.y)/view.s];view.s=Math.min(Math.max(view.s*f,.02),40);view.x=p.m[0]-ip[0]*view.s;view.y=p.m[1]-ip[1]*view.s;last=p;draw();return}
+ if(!drag||gest)return;const dx=e.offsetX-drag.x,dy=e.offsetY-drag.y;if(Math.hypot(dx,dy)>5)drag.moved=1;if(!drag.moved)return;
+ if(drag.id){if(!drag.pushed){push();drag.pushed=1}const l=S.lm.find(l=>l.id==drag.id),p=toImg(e.offsetX,e.offsetY);l.x=p[0];l.y=p[1];draw()}else if(tool=='pan'){view.x=drag.vx+dx;view.y=drag.vy+dy;draw()}else if(tool=='crop'){const a=toImg(drag.x,drag.y),b=toImg(e.offsetX,e.offsetY);cropR={x0:a[0],y0:a[1],x1:b[0],y1:b[1]};draw()}};
+cv.onpointerup=cv.onpointercancel=e=>{delete PT[e.pointerId];const d=drag;if(Object.keys(PT).length==0){drag=null;if(d&&!gest){if(d.pushed)changed();else if(d.moved&&tool=='crop'&&cropR){applyCrop()}else if(!d.moved&&img){const p=toImg(d.x,d.y);
+ if(showPlan&&tool!='pan'){$('#st').textContent='Switch to Baseline to edit.'}else if(tool=='lm'){if(d.hit){selL=d.hit.id;R();draw()}else addLm(p[0],p[1])}
+ else if(tool=='cal'&&calPts.length<2){calPts.push(p);R();draw()}else if(tool=='ang'){angTap(d.hit,p)}}}gest=false}else if(Object.keys(PT).length==1)last=null};
+cv.onwheel=e=>{e.preventDefault();const f=e.deltaY<0?1.15:1/1.15,ip=toImg(e.offsetX,e.offsetY);view.s=Math.min(Math.max(view.s*f,.02),40);view.x=e.offsetX-ip[0]*view.s;view.y=e.offsetY-ip[1]*view.s;draw()};
+new ResizeObserver(()=>{if(img&&!view.fitted){}draw()}).observe($('#vw'));
+setTool('pan');changed(1);
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('service-worker.js').catch(()=>{}));
+</script></body></html>
